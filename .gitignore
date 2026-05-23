@@ -1,0 +1,63 @@
+# =========================
+# Visual Studio Specific
+# =========================
+.vs/
+*.user
+*.userosscache
+*.sln.docstates
+*.suo
+*.opendb
+*.VC.db
+*.tlog
+
+# =========================
+# Build Directories & Output
+# =========================
+x64/
+x86/
+arm64/
+Debug/
+Release/
+build/
+out/
+bin/
+obj/
+
+# =========================
+# C++ Compilation Artifacts
+# =========================
+*.obj
+*.exe
+*.dll
+*.lib
+*.ilk
+*.pdb
+*.exp
+*.idb
+*.iobj
+*.ipdb
+*.res
+*.pch
+
+# =========================
+# Package Managers & CMake
+# =========================
+vcpkg_installed/
+CMakeCache.txt
+CMakeFiles/
+CMakeScripts/
+Makefile
+cmake_install.cmake
+install_manifest.txt
+compile_commands.json
+
+# =========================
+# Voxel Engine Specifics
+# =========================
+# Ignore local log files
+*.log
+
+# Ignore local save data or generated voxel chunks
+saves/
+userdata/
+*.sav

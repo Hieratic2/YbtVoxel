@@ -1,0 +1,7 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="YbtVoxel.vcxproj" Id="c31617b1-9aee-424c-b57d-11e1a15eceed" />
+</Solution>
