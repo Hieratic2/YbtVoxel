@@ -55,6 +55,13 @@ int main()
 				break;
 			}
 
+			if (event.type == SDL_EVENT_KEY_DOWN &&
+				event.key.key == SDLK_ESCAPE)
+			{
+				quit = true;
+				break;
+			}
+
 			if (event.type == SDL_EVENT_WINDOW_RESIZED)
 			{
 				int width = event.window.data1;
@@ -63,6 +70,9 @@ int main()
 				glViewport(0, 0, width, height);
 			}
 		}
+		glClearColor(0.2f, 0.3f, 0.3f, 1.0f);
+		glClear(GL_COLOR_BUFFER_BIT);
+		SDL_GL_SwapWindow(window);
 	}
 
 	SDL_Quit();
