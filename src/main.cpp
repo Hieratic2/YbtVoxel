@@ -3,14 +3,21 @@
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/type_ptr.hpp>
+#define STB_IMAGE_IMPLEMENTATION
+#include <stb_image.h>
 #include <iostream>
 #include <vector>
 #include <cmath>
 
+constexpr int TILE_GRASS_TOP = 0;
+constexpr int TILE_GRASS_SIDE = 1;
+constexpr int TILE_DIRT = 2;
+constexpr int TILE_STONE = 3;
+
 const char* vertexShaderSource = R"(
 #version 460 core
-layout (location = 0) in vec3 aPos;
-layout (location = 1) in vec2 aTexCoord;
+layout (location = 0) in vec3  aPos;
+layout (location = 1) in vec2  aTexCoord;
 layout (location = 2) in float aFaceLight;
 
 out vec2  TexCoord;
@@ -33,19 +40,24 @@ in vec2  TexCoord;
 in float FaceLight;
 out vec4 FragColor;
 
+uniform sampler2D uAtlas;
+
 void main()
 {
-    // Checkerboard pattern — replace with texture atlas later
-    vec2  uv      = floor(TexCoord * 4.0);
-    float checker = mod(uv.x + uv.y, 2.0);
-    vec3  col     = mix(vec3(0.28, 0.65, 0.18), vec3(0.18, 0.48, 0.10), checker);
-    FragColor     = vec4(col * FaceLight, 1.0);
+    vec4 texColor = texture(uAtlas, TexCoord);
+    vec3 col = texColor.rgb * FaceLight;
+
+    // Grass top tint — same green Minecraft uses
+    if (TexCoord.x < 0.5 && TexCoord.y < 0.5)
+        col *= vec3(0.47, 0.72, 0.25);
+
+    FragColor = vec4(col, texColor.a);
 }
 )";
 
 struct Camera
 {
-    glm::vec3 position = glm::vec3(16.0f, 20.0f, 16.0f);
+    glm::vec3 position = glm::vec3(32.0f, 20.0f, 32.0f);
     glm::vec3 front = glm::vec3(0.0f, 0.0f, -1.0f);
     glm::vec3 up = glm::vec3(0.0f, 1.0f, 0.0f);
 
@@ -59,7 +71,6 @@ struct Camera
     {
         yaw += xOffset * sensitivity;
         pitch -= yOffset * sensitivity;
-
         if (pitch > 89.0f) pitch = 89.0f;
         if (pitch < -89.0f) pitch = -89.0f;
 
@@ -88,7 +99,6 @@ struct Camera
     {
         return glm::lookAt(position, position + front, up);
     }
-
     glm::mat4 getProjectionMatrix(float aspect) const
     {
         return glm::perspective(glm::radians(fov), aspect, 0.05f, 500.0f);
@@ -116,57 +126,42 @@ namespace Perlin
         204,176,115,121,50,45,127,4,150,254,138,236,205,93,222,114,
         67,29,24,72,243,141,128,195,78,66,215,61,156,180
     };
-
-    static void seed()
-    {
-        for (int i = 0; i < 256; i++) p[i] = p[i + 256] = perm[i];
-    }
-
+    static void seed() { for (int i = 0;i < 256;i++) p[i] = p[i + 256] = perm[i]; }
     static float fade(float t) { return t * t * t * (t * (t * 6 - 15) + 10); }
     static float lerp(float a, float b, float t) { return a + t * (b - a); }
-    static float grad(int hash, float x, float y)
-    {
-        int   h = hash & 7;
-        float u = h < 4 ? x : y;
-        float v = h < 4 ? y : x;
+    static float grad(int hash, float x, float y) {
+        int h = hash & 7; float u = h < 4 ? x : y, v = h < 4 ? y : x;
         return ((h & 1) ? -u : u) + ((h & 2) ? -v : v);
     }
-
-    static float noise(float x, float y)
-    {
-        int X = (int)floor(x) & 255;
-        int Y = (int)floor(y) & 255;
-        x -= floor(x);
-        y -= floor(y);
+    static float noise(float x, float y) {
+        int X = (int)floor(x) & 255, Y = (int)floor(y) & 255;
+        x -= floor(x); y -= floor(y);
         float u = fade(x), v = fade(y);
         int A = p[X] + Y, B = p[X + 1] + Y;
-        return lerp(lerp(grad(p[A], x, y),
-            grad(p[B], x - 1, y), u),
-            lerp(grad(p[A + 1], x, y - 1),
-                grad(p[B + 1], x - 1, y - 1), u), v);
+        return lerp(lerp(grad(p[A], x, y), grad(p[B], x - 1, y), u),
+            lerp(grad(p[A + 1], x, y - 1), grad(p[B + 1], x - 1, y - 1), u), v);
     }
-
-    static float fbm(float x, float y, int octaves = 4, float persistence = 0.5f)
-    {
-        float value = 0.0f, amplitude = 1.0f, frequency = 1.0f, maxVal = 0.0f;
-        for (int i = 0; i < octaves; i++) {
-            value += noise(x * frequency, y * frequency) * amplitude;
-            maxVal += amplitude;
-            amplitude *= persistence;
-            frequency *= 2.0f;
+    static float fbm(float x, float y, int oct = 4, float pers = 0.5f) {
+        float val = 0, amp = 1, freq = 1, maxV = 0;
+        for (int i = 0;i < oct;i++) {
+            val += noise(x * freq, y * freq) * amp; maxV += amp; amp *= pers; freq *= 2;
         }
-        return value / maxVal;
+        return val / maxV;
     }
 }
 
 constexpr int WORLD_W = 64;
 constexpr int WORLD_H = 24;
 constexpr int WORLD_D = 64;
-
 constexpr int CHUNK_W = 16;
 constexpr int CHUNK_D = 16;
 constexpr int NUM_CX = WORLD_W / CHUNK_W;
 constexpr int NUM_CZ = WORLD_D / CHUNK_D;
+
+constexpr uint8_t BLOCK_AIR = 0;
+constexpr uint8_t BLOCK_GRASS = 1;
+constexpr uint8_t BLOCK_DIRT = 2;
+constexpr uint8_t BLOCK_STONE = 3;
 
 static uint8_t world[WORLD_W][WORLD_H][WORLD_D];
 static int     heightMap[WORLD_W][WORLD_D];
@@ -182,41 +177,76 @@ static void generateWorld()
             float n = Perlin::fbm(x * SCALE, z * SCALE);
             float t = (n + 1.0f) * 0.5f;
             int   top = BASE_HEIGHT + (int)(t * HEIGHT_RANGE);
-            top = (top >= WORLD_H) ? WORLD_H - 1 : top;
+            if (top >= WORLD_H) top = WORLD_H - 1;
 
             heightMap[x][z] = top;
-            for (int y = 0; y <= top; y++)
-                world[x][y][z] = 1;
+
+            for (int y = 0; y <= top; y++) {
+                if (y == top)     world[x][y][z] = BLOCK_GRASS;
+                else if (y >= top - 3) world[x][y][z] = BLOCK_DIRT;
+                else                   world[x][y][z] = BLOCK_STONE;
+            }
         }
     }
 }
 
-static bool isSolid(int x, int y, int z)
+static uint8_t getBlock(int x, int y, int z)
 {
-    if (x < 0 || x >= WORLD_W || y < 0 || y >= WORLD_H || z < 0 || z >= WORLD_D)
-        return false;
-    return world[x][y][z] != 0;
+    if (x < 0 || x >= WORLD_W || y < 0 || y >= WORLD_H || z < 0 || z >= WORLD_D) return BLOCK_AIR;
+    return world[x][y][z];
 }
+static bool isSolid(int x, int y, int z) { return getBlock(x, y, z) != BLOCK_AIR; }
+
 
 struct Vertex { float x, y, z, u, v, light; };
+
 static constexpr float LIGHT_TOP = 1.00f;
 static constexpr float LIGHT_BOTTOM = 0.45f;
 static constexpr float LIGHT_SIDE_Z = 0.80f;
 static constexpr float LIGHT_SIDE_X = 0.65f;
 
-static void pushQuad(std::vector<Vertex>& v,
+static glm::vec2 tileUV(int tile)
+{
+    float u = (tile % 2) * 0.5f;
+    float v = (tile / 2) * 0.5f;
+    return { u, v };
+}
+
+static int getTile(uint8_t block, int face)
+{
+    switch (block) {
+    case BLOCK_GRASS:
+        if (face == 0) return TILE_GRASS_TOP;
+        if (face == 1) return TILE_DIRT;
+        return TILE_GRASS_SIDE;
+    case BLOCK_DIRT:  return TILE_DIRT;
+    case BLOCK_STONE: return TILE_STONE;
+    default:          return TILE_STONE;
+    }
+}
+
+static void pushQuad(std::vector<Vertex>& verts,
     float x0, float y0, float z0,
     float x1, float y1, float z1,
     float x2, float y2, float z2,
     float x3, float y3, float z3,
-    float light)
+    float light, int tile)
 {
-    v.push_back({ x0,y0,z0, 0,0, light });
-    v.push_back({ x1,y1,z1, 1,0, light });
-    v.push_back({ x2,y2,z2, 1,1, light });
-    v.push_back({ x0,y0,z0, 0,0, light });
-    v.push_back({ x2,y2,z2, 1,1, light });
-    v.push_back({ x3,y3,z3, 0,1, light });
+    glm::vec2 base = tileUV(tile);
+    float s = 0.5f;
+
+    glm::vec2 uvA = base + glm::vec2(0.0f, s);
+    glm::vec2 uvB = base + glm::vec2(s, s);
+    glm::vec2 uvC = base + glm::vec2(s, 0.0f);
+    glm::vec2 uvD = base + glm::vec2(0.0f, 0.0f);
+
+    verts.push_back({ x0,y0,z0, uvA.x,uvA.y, light });
+    verts.push_back({ x1,y1,z1, uvB.x,uvB.y, light });
+    verts.push_back({ x2,y2,z2, uvC.x,uvC.y, light });
+    
+    verts.push_back({ x0,y0,z0, uvA.x,uvA.y, light });
+    verts.push_back({ x2,y2,z2, uvC.x,uvC.y, light });
+    verts.push_back({ x3,y3,z3, uvD.x,uvD.y, light });
 }
 
 static std::vector<Vertex> buildChunkMesh(int cx, int cz)
@@ -227,113 +257,145 @@ static std::vector<Vertex> buildChunkMesh(int cx, int cz)
     int startX = cx * CHUNK_W;
     int startZ = cz * CHUNK_D;
 
-    for (int lx = 0; lx < CHUNK_W; lx++) {
-        for (int lz = 0; lz < CHUNK_D; lz++) {
-            for (int y = 0; y < WORLD_H; y++) {
+    for (int lx = 0; lx < CHUNK_W; lx++)
+        for (int lz = 0; lz < CHUNK_D; lz++)
+            for (int y = 0; y < WORLD_H; y++)
+            {
                 int wx = startX + lx;
                 int wz = startZ + lz;
-                if (!isSolid(wx, y, wz)) continue;
+                uint8_t block = getBlock(wx, y, wz);
+                if (block == BLOCK_AIR) continue;
 
-                float x = (float)wx;
-                float Y = (float)y;
-                float z = (float)wz;
+                float x = (float)wx, Y = (float)y, z = (float)wz;
+
                 if (!isSolid(wx, y + 1, wz))
                     pushQuad(verts,
-                        x, Y + 1, z,       
-                        x + 1, Y + 1, z,    
-                        x + 1, Y + 1, z + 1,
-                        x, Y + 1, z + 1,  
-                        LIGHT_TOP);
-
+                        x, Y + 1, z, x + 1, Y + 1, z, x + 1, Y + 1, z + 1, x, Y + 1, z + 1,
+                        LIGHT_TOP, getTile(block, 0));
+                
                 if (!isSolid(wx, y - 1, wz))
                     pushQuad(verts,
-                        x + 1, Y, z,
-                        x, Y, z,
-                        x, Y, z + 1,    
-                        x + 1, Y, z + 1,
-                        LIGHT_BOTTOM);
-
+                        x + 1, Y, z, x, Y, z, x, Y, z + 1, x + 1, Y, z + 1,
+                        LIGHT_BOTTOM, getTile(block, 1));
+               
                 if (!isSolid(wx, y, wz + 1))
                     pushQuad(verts,
-                        x, Y, z + 1,     
-                        x + 1, Y, z + 1,     
-                        x + 1, Y + 1, z + 1, 
-                        x, Y + 1, z + 1,     
-                        LIGHT_SIDE_Z);
-
+                        x, Y, z + 1, x + 1, Y, z + 1, x + 1, Y + 1, z + 1, x, Y + 1, z + 1,
+                        LIGHT_SIDE_Z, getTile(block, 2));
+                
                 if (!isSolid(wx, y, wz - 1))
                     pushQuad(verts,
-                        x + 1, Y, z,
-                        x, Y, z,
-                        x, Y + 1, z,
-                        x + 1, Y + 1, z,
-                        LIGHT_SIDE_Z);
-
+                        x + 1, Y, z, x, Y, z, x, Y + 1, z, x + 1, Y + 1, z,
+                        LIGHT_SIDE_Z, getTile(block, 2));
+                
                 if (!isSolid(wx + 1, y, wz))
                     pushQuad(verts,
-                        x + 1, Y, z + 1,
-                        x + 1, Y, z,
-                        x + 1, Y + 1, z,
-                        x + 1, Y + 1, z + 1,
-                        LIGHT_SIDE_X);
-
+                        x + 1, Y, z + 1, x + 1, Y, z, x + 1, Y + 1, z, x + 1, Y + 1, z + 1,
+                        LIGHT_SIDE_X, getTile(block, 2));
+                
                 if (!isSolid(wx - 1, y, wz))
                     pushQuad(verts,
-                        x, Y, z,
-                        x, Y, z + 1,
-                        x, Y + 1, z + 1,
-                        x, Y + 1, z,
-                        LIGHT_SIDE_X);
+                        x, Y, z, x, Y, z + 1, x, Y + 1, z + 1, x, Y + 1, z,
+                        LIGHT_SIDE_X, getTile(block, 2));
             }
-        }
-    }
-
     return verts;
 }
+
 
 struct ChunkMesh
 {
     unsigned int VAO = 0, VBO = 0;
-    int          count = 0;
+    int count = 0;
 
-    void upload(const std::vector<Vertex>& verts)
+    void upload(const std::vector<Vertex>& v)
     {
-        count = (int)verts.size();
-        if (count == 0) return;
-
+        count = (int)v.size();
+        if (!count) return;
         if (!VAO) { glGenVertexArrays(1, &VAO); glGenBuffers(1, &VBO); }
-
         glBindVertexArray(VAO);
         glBindBuffer(GL_ARRAY_BUFFER, VBO);
-        glBufferData(GL_ARRAY_BUFFER, count * sizeof(Vertex), verts.data(), GL_STATIC_DRAW);
-
+        glBufferData(GL_ARRAY_BUFFER, count * sizeof(Vertex), v.data(), GL_STATIC_DRAW);
         glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, x));
         glEnableVertexAttribArray(0);
-
         glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, u));
         glEnableVertexAttribArray(1);
-        
         glVertexAttribPointer(2, 1, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, light));
         glEnableVertexAttribArray(2);
-
         glBindVertexArray(0);
     }
-
     void draw()  const { if (count) { glBindVertexArray(VAO); glDrawArrays(GL_TRIANGLES, 0, count); } }
     void destroy() { if (VAO) { glDeleteVertexArrays(1, &VAO); glDeleteBuffers(1, &VBO); VAO = VBO = 0; } }
 };
+
+static unsigned int loadTextureAtlas(const char* grassTop,
+    const char* grassSide,
+    const char* dirt,
+    const char* stone,
+    int tileSize = 32)
+{
+    int atlasW = tileSize * 2;
+    int atlasH = tileSize * 2;
+    std::vector<unsigned char> atlas(atlasW * atlasH * 4, 0);
+
+    auto blit = [&](const char* path, int offX, int offY)
+        {
+            int w, h, ch;
+            stbi_set_flip_vertically_on_load(false);
+            unsigned char* img = stbi_load(path, &w, &h, &ch, 4);
+            if (!img) {
+                SDL_Log("Failed to load texture: %s — %s", path, stbi_failure_reason());
+                
+                for (int py = 0; py < tileSize; py++)
+                    for (int px = 0; px < tileSize; px++) {
+                        int idx = ((offY + py) * atlasW + (offX + px)) * 4;
+                        atlas[idx] = 255; atlas[idx + 1] = 0; atlas[idx + 2] = 255; atlas[idx + 3] = 255;
+                    }
+                return;
+            }
+            
+            for (int py = 0; py < tileSize; py++) {
+                for (int px = 0; px < tileSize; px++) {
+                    int srcX = px * w / tileSize;
+                    int srcY = py * h / tileSize;
+                    int src = (srcY * w + srcX) * 4;
+                    int dst = ((offY + py) * atlasW + (offX + px)) * 4;
+                    atlas[dst + 0] = img[src + 0];
+                    atlas[dst + 1] = img[src + 1];
+                    atlas[dst + 2] = img[src + 2];
+                    atlas[dst + 3] = img[src + 3];
+                }
+            }
+            stbi_image_free(img);
+        };
+
+    blit(grassTop, 0, 0);
+    blit(grassSide, tileSize, 0);
+    blit(dirt, 0, tileSize);
+    blit(stone, tileSize, tileSize);
+
+    unsigned int texID;
+    glGenTextures(1, &texID);
+    glBindTexture(GL_TEXTURE_2D, texID);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, atlasW, atlasH, 0,
+        GL_RGBA, GL_UNSIGNED_BYTE, atlas.data());
+    glGenerateMipmap(GL_TEXTURE_2D);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST_MIPMAP_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+
+    return texID;
+}
 
 
 static unsigned int compileShader(GLenum type, const char* src)
 {
     unsigned int s = glCreateShader(type);
-    glShaderSource(s, 1, &src, nullptr);
-    glCompileShader(s);
+    glShaderSource(s, 1, &src, nullptr); glCompileShader(s);
     int ok; glGetShaderiv(s, GL_COMPILE_STATUS, &ok);
-    if (!ok) { char log[512]; glGetShaderInfoLog(s, 512, nullptr, log); SDL_Log("Shader error: %s", log); }
+    if (!ok) { char log[512]; glGetShaderInfoLog(s, 512, nullptr, log); SDL_Log("Shader: %s", log); }
     return s;
 }
-
 static unsigned int createProgram(const char* vs, const char* fs)
 {
     unsigned int v = compileShader(GL_VERTEX_SHADER, vs);
@@ -341,7 +403,7 @@ static unsigned int createProgram(const char* vs, const char* fs)
     unsigned int p = glCreateProgram();
     glAttachShader(p, v); glAttachShader(p, f); glLinkProgram(p);
     int ok; glGetProgramiv(p, GL_LINK_STATUS, &ok);
-    if (!ok) { char log[512]; glGetProgramInfoLog(p, 512, nullptr, log); SDL_Log("Link error: %s", log); }
+    if (!ok) { char log[512]; glGetProgramInfoLog(p, 512, nullptr, log); SDL_Log("Link: %s", log); }
     glDeleteShader(v); glDeleteShader(f);
     return p;
 }
@@ -369,29 +431,37 @@ int main()
     SDL_GLContext ctx = SDL_GL_CreateContext(window);
     if (!gladLoadGLLoader((GLADloadproc)SDL_GL_GetProcAddress))
     {
-        SDL_Log("GLAD failed"); SDL_Quit(); return -1;
+        SDL_Log("GLAD failed");
+        SDL_Quit();
+        return -1;
     }
 
     SDL_GL_SetSwapInterval(1);
     SDL_SetWindowRelativeMouseMode(window, true);
 
     glEnable(GL_DEPTH_TEST);
-    glEnable(GL_CULL_FACE);
     glDisable(GL_CULL_FACE);
-    glFrontFace(GL_CCW);
     glEnable(GL_MULTISAMPLE);
     glClearColor(0.53f, 0.81f, 0.98f, 1.0f);
 
     unsigned int shader = createProgram(vertexShaderSource, fragmentShaderSource);
     int uView = glGetUniformLocation(shader, "view");
     int uProj = glGetUniformLocation(shader, "projection");
+    int uAtlas = glGetUniformLocation(shader, "uAtlas");
+
+    unsigned int atlasID = loadTextureAtlas(
+        "./assets/grass_block_top.png",
+        "./assets/grass_block_side.png",
+        "./assets/dirt.png",
+        "./assets/stone.png"
+    );
 
     Perlin::seed();
     generateWorld();
 
     ChunkMesh chunks[NUM_CX][NUM_CZ];
-    for (int cx = 0; cx < NUM_CX; cx++)
-        for (int cz = 0; cz < NUM_CZ; cz++)
+    for (int cx = 0;cx < NUM_CX;cx++)
+        for (int cz = 0;cz < NUM_CZ;cz++)
             chunks[cx][cz].upload(buildChunkMesh(cx, cz));
 
     Camera camera;
@@ -405,15 +475,14 @@ int main()
     while (!quit)
     {
         Uint64 now = SDL_GetTicks();
-        float  dt = (now - lastTime) / 1000.0f;
+        float dt = (now - lastTime) / 1000.0f;
         lastTime = now;
 
         while (SDL_PollEvent(&event))
         {
             if (event.type == SDL_EVENT_QUIT) quit = true;
             if (event.type == SDL_EVENT_KEY_DOWN && event.key.key == SDLK_ESCAPE) quit = true;
-            if (event.type == SDL_EVENT_WINDOW_RESIZED)
-            {
+            if (event.type == SDL_EVENT_WINDOW_RESIZED) {
                 windowWidth = event.window.data1; windowHeight = event.window.data2;
                 glViewport(0, 0, windowWidth, windowHeight);
             }
@@ -425,20 +494,26 @@ int main()
 
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
         glUseProgram(shader);
+
+        glActiveTexture(GL_TEXTURE0);
+        glBindTexture(GL_TEXTURE_2D, atlasID);
+        glUniform1i(uAtlas, 0);
+
         glUniformMatrix4fv(uView, 1, GL_FALSE, glm::value_ptr(camera.getViewMatrix()));
         glUniformMatrix4fv(uProj, 1, GL_FALSE, glm::value_ptr(camera.getProjectionMatrix((float)windowWidth / windowHeight)));
 
-        for (int cx = 0; cx < NUM_CX; cx++)
-            for (int cz = 0; cz < NUM_CZ; cz++)
+        for (int cx = 0;cx < NUM_CX;cx++)
+            for (int cz = 0;cz < NUM_CZ;cz++)
                 chunks[cx][cz].draw();
 
         SDL_GL_SwapWindow(window);
     }
 
-    for (int cx = 0; cx < NUM_CX; cx++)
-        for (int cz = 0; cz < NUM_CZ; cz++)
+    for (int cx = 0;cx < NUM_CX;cx++)
+        for (int cz = 0;cz < NUM_CZ;cz++)
             chunks[cx][cz].destroy();
 
+    glDeleteTextures(1, &atlasID);
     glDeleteProgram(shader);
     SDL_GL_DestroyContext(ctx);
     SDL_DestroyWindow(window);
