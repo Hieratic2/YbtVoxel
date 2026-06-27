@@ -261,13 +261,14 @@ namespace Perlin
 //  WORLD
 // =============================================================
 
-constexpr int WORLD_W = 64;
+constexpr int WORLD_W = 128;
 constexpr int WORLD_H = 24;
-constexpr int WORLD_D = 64;
+constexpr int WORLD_D = 128;
 constexpr int CHUNK_W = 16;
 constexpr int CHUNK_D = 16;
-constexpr int NUM_CX = WORLD_W / CHUNK_W;
-constexpr int NUM_CZ = WORLD_D / CHUNK_D;
+constexpr int NUM_CX = WORLD_W / CHUNK_W;   // 8
+constexpr int NUM_CZ = WORLD_D / CHUNK_D;   // 8
+constexpr int RENDER_DIST = 6;               // chunks
 
 constexpr uint8_t BLOCK_AIR = 0;
 constexpr uint8_t BLOCK_GRASS = 1;
@@ -556,6 +557,159 @@ static unsigned int createProgram(const char* vs, const char* fs)
 //  MAIN
 // =============================================================
 
+
+// =============================================================
+//  RAY CASTING  (DDA — Digital Differential Analyzer)
+//  Finds the first solid block along a ray from 'origin'
+//  in direction 'dir', up to 'maxDist' blocks away.
+//  Returns true and sets:
+//    hitPos  — integer coords of the hit block
+//    prevPos — integer coords of the block just before the hit
+//              (used for placing a new block)
+// =============================================================
+
+struct RayHit { glm::ivec3 block; glm::ivec3 prev; bool hit; };
+
+static RayHit castRay(glm::vec3 origin, glm::vec3 dir, float maxDist = 6.0f)
+{
+    // Normalise direction
+    if (glm::length(dir) < 0.0001f) return { {}, {}, false };
+    dir = glm::normalize(dir);
+
+    glm::ivec3 cur = glm::ivec3(glm::floor(origin));
+    glm::ivec3 step = glm::ivec3(dir.x > 0 ? 1 : -1,
+        dir.y > 0 ? 1 : -1,
+        dir.z > 0 ? 1 : -1);
+
+    // tMax: distance along ray to the first grid crossing in each axis
+    // tDelta: distance between consecutive grid crossings
+    glm::vec3 tDelta = glm::abs(glm::vec3(1.0f) / dir);
+    glm::vec3 tMax;
+    tMax.x = (dir.x > 0 ? (floor(origin.x) + 1 - origin.x) : (origin.x - floor(origin.x))) * tDelta.x;
+    tMax.y = (dir.y > 0 ? (floor(origin.y) + 1 - origin.y) : (origin.y - floor(origin.y))) * tDelta.y;
+    tMax.z = (dir.z > 0 ? (floor(origin.z) + 1 - origin.z) : (origin.z - floor(origin.z))) * tDelta.z;
+
+    glm::ivec3 prev = cur;
+    float dist = 0.0f;
+
+    while (dist < maxDist) {
+        if (isSolid(cur.x, cur.y, cur.z))
+            return { cur, prev, true };
+
+        prev = cur;
+        if (tMax.x < tMax.y && tMax.x < tMax.z) {
+            dist = tMax.x; tMax.x += tDelta.x; cur.x += step.x;
+        }
+        else if (tMax.y < tMax.z) {
+            dist = tMax.y; tMax.y += tDelta.y; cur.y += step.y;
+        }
+        else {
+            dist = tMax.z; tMax.z += tDelta.z; cur.z += step.z;
+        }
+    }
+    return { {}, {}, false };
+}
+
+// =============================================================
+//  HIGHLIGHT SHADER  — draws a wireframe outline on the
+//  selected block using GL_LINES
+// =============================================================
+
+const char* highlightVertSrc = R"(
+#version 460 core
+layout (location = 0) in vec3 aPos;
+uniform mat4 view;
+uniform mat4 projection;
+uniform mat4 model;
+void main() {
+    gl_Position = projection * view * model * vec4(aPos, 1.0);
+}
+)";
+
+const char* highlightFragSrc = R"(
+#version 460 core
+out vec4 FragColor;
+void main() {
+    FragColor = vec4(0.0, 0.0, 0.0, 1.0);  // black outline
+}
+)";
+
+// =============================================================
+//  CROSSHAIR SHADER  — 2D, drawn in NDC after world render
+// =============================================================
+
+const char* crosshairVertSrc = R"(
+#version 460 core
+layout (location = 0) in vec2 aPos;
+void main() {
+    gl_Position = vec4(aPos, 0.0, 1.0);
+}
+)";
+
+const char* crosshairFragSrc = R"(
+#version 460 core
+out vec4 FragColor;
+void main() {
+    FragColor = vec4(1.0, 1.0, 1.0, 1.0);
+}
+)";
+
+// =============================================================
+//  HIGHLIGHT MESH  — 12 edges of a unit cube, slightly expanded
+// =============================================================
+
+static void buildHighlightLines(unsigned int& VAO, unsigned int& VBO)
+{
+    // 12 edges × 2 vertices = 24 vertices
+    // Slightly expanded by 0.005 to avoid z-fighting
+    constexpr float E = 0.005f;
+    float v[] = {
+        // Bottom face
+        -E,-E,-E,  1 + E,-E,-E,
+        1 + E,-E,-E, 1 + E,-E,1 + E,
+        1 + E,-E,1 + E,-E,-E,1 + E,
+        -E,-E,1 + E, -E,-E,-E,
+        // Top face
+        -E,1 + E,-E,  1 + E,1 + E,-E,
+        1 + E,1 + E,-E, 1 + E,1 + E,1 + E,
+        1 + E,1 + E,1 + E,-E,1 + E,1 + E,
+        -E,1 + E,1 + E, -E,1 + E,-E,
+        // Vertical edges
+        -E,-E,-E,  -E,1 + E,-E,
+        1 + E,-E,-E, 1 + E,1 + E,-E,
+        1 + E,-E,1 + E,1 + E,1 + E,1 + E,
+        -E,-E,1 + E, -E,1 + E,1 + E,
+    };
+    glGenVertexArrays(1, &VAO);
+    glGenBuffers(1, &VBO);
+    glBindVertexArray(VAO);
+    glBindBuffer(GL_ARRAY_BUFFER, VBO);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(v), v, GL_STATIC_DRAW);
+    glVertexAttribPointer(0, 3, GL_FLOAT, GL_FALSE, 3 * sizeof(float), (void*)0);
+    glEnableVertexAttribArray(0);
+    glBindVertexArray(0);
+}
+
+// =============================================================
+//  CROSSHAIR MESH  — two short lines in NDC
+// =============================================================
+
+static void buildCrosshair(unsigned int& VAO, unsigned int& VBO, float size = 0.02f)
+{
+    float v[] = {
+        -size, 0.0f,   size, 0.0f,   // horizontal
+         0.0f,-size,   0.0f, size,   // vertical
+    };
+    glGenVertexArrays(1, &VAO);
+    glGenBuffers(1, &VBO);
+    glBindVertexArray(VAO);
+    glBindBuffer(GL_ARRAY_BUFFER, VBO);
+    glBufferData(GL_ARRAY_BUFFER, sizeof(v), v, GL_STATIC_DRAW);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 2 * sizeof(float), (void*)0);
+    glEnableVertexAttribArray(0);
+    glBindVertexArray(0);
+}
+
 int main()
 {
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 4);
@@ -566,8 +720,8 @@ int main()
 
     if (!SDL_Init(SDL_INIT_VIDEO)) { SDL_Log("SDL init failed"); return -1; }
 
-    int winW = 1280, winH = 720;
-    SDL_Window* window = SDL_CreateWindow("YbtVoxel", winW, winH,
+    int windowWidth = 1280, windowHeight = 720;
+    SDL_Window* window = SDL_CreateWindow("YbtVoxel", windowWidth, windowHeight,
         SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE);
     if (!window) { SDL_Log("Window failed"); SDL_Quit(); return -1; }
 
@@ -589,6 +743,19 @@ int main()
     int uView = glGetUniformLocation(shader, "view");
     int uProj = glGetUniformLocation(shader, "projection");
     int uAtlas = glGetUniformLocation(shader, "uAtlas");
+
+    // Highlight (block outline) shader + mesh
+    unsigned int hlShader = createProgram(highlightVertSrc, highlightFragSrc);
+    int hlView = glGetUniformLocation(hlShader, "view");
+    int hlProj = glGetUniformLocation(hlShader, "projection");
+    int hlModel = glGetUniformLocation(hlShader, "model");
+    unsigned int hlVAO = 0, hlVBO = 0;
+    buildHighlightLines(hlVAO, hlVBO);
+
+    // Crosshair shader + mesh
+    unsigned int chShader = createProgram(crosshairVertSrc, crosshairFragSrc);
+    unsigned int chVAO = 0, chVBO = 0;
+    buildCrosshair(chVAO, chVBO);
 
     unsigned int atlasID = loadTextureAtlas(
         "./assets/grass_block_top.png",
@@ -626,11 +793,60 @@ int main()
             if (event.type == SDL_EVENT_QUIT) quit = true;
             if (event.type == SDL_EVENT_KEY_DOWN && event.key.key == SDLK_ESCAPE) quit = true;
             if (event.type == SDL_EVENT_WINDOW_RESIZED) {
-                winW = event.window.data1; winH = event.window.data2;
-                glViewport(0, 0, winW, winH);
+                windowWidth = event.window.data1; windowHeight = event.window.data2;
+                glViewport(0, 0, windowWidth, windowHeight);
             }
             if (event.type == SDL_EVENT_MOUSE_MOTION)
                 player.processMouseMove((float)event.motion.xrel, (float)event.motion.yrel);
+
+            // Block interaction
+            if (event.type == SDL_EVENT_MOUSE_BUTTON_DOWN)
+            {
+                RayHit hit = castRay(player.eyePos(), player.front);
+                if (hit.hit)
+                {
+                    int cx = -1, cz = -1;
+                    if (event.button.button == SDL_BUTTON_LEFT)
+                    {
+                        // Break block
+                        world[hit.block.x][hit.block.y][hit.block.z] = BLOCK_AIR;
+                        cx = hit.block.x / CHUNK_W;
+                        cz = hit.block.z / CHUNK_D;
+                    }
+                    else if (event.button.button == SDL_BUTTON_RIGHT)
+                    {
+                        // Place block — only if not inside player AABB
+                        glm::vec3 pPos = glm::vec3(hit.prev);
+                        if (!Player::overlapsBlock(player.position + glm::vec3(0, 0, 0) * 0.0f))
+                        {
+                            // Simple check: don't place inside player
+                            glm::vec3 blockMin = pPos;
+                            glm::vec3 blockMax = pPos + glm::vec3(1);
+                            glm::vec3 pMin = player.position - glm::vec3(Player::W, 0, Player::W);
+                            glm::vec3 pMax = player.position + glm::vec3(Player::W, Player::H, Player::W);
+                            bool overlap =
+                                blockMax.x > pMin.x && blockMin.x < pMax.x &&
+                                blockMax.y > pMin.y && blockMin.y < pMax.y &&
+                                blockMax.z > pMin.z && blockMin.z < pMax.z;
+                            if (!overlap &&
+                                hit.prev.x >= 0 && hit.prev.x < WORLD_W &&
+                                hit.prev.y >= 0 && hit.prev.y < WORLD_H &&
+                                hit.prev.z >= 0 && hit.prev.z < WORLD_D)
+                            {
+                                world[hit.prev.x][hit.prev.y][hit.prev.z] = BLOCK_DIRT;
+                                cx = hit.prev.x / CHUNK_W;
+                                cz = hit.prev.z / CHUNK_D;
+                            }
+                        }
+                    }
+                    // Rebuild affected chunk
+                    if (cx >= 0 && cx < NUM_CX && cz >= 0 && cz < NUM_CZ)
+                    {
+                        chunks[cx][cz].destroy();
+                        chunks[cx][cz].upload(buildChunkMesh(cx, cz));
+                    }
+                }
+            }
         }
 
         player.update(SDL_GetKeyboardState(nullptr), dt);
@@ -643,11 +859,46 @@ int main()
         glUniform1i(uAtlas, 0);
 
         glUniformMatrix4fv(uView, 1, GL_FALSE, glm::value_ptr(player.getViewMatrix()));
-        glUniformMatrix4fv(uProj, 1, GL_FALSE, glm::value_ptr(player.getProjectionMatrix((float)winW / winH)));
+        glUniformMatrix4fv(uProj, 1, GL_FALSE, glm::value_ptr(player.getProjectionMatrix((float)windowWidth / windowHeight)));
 
+        // Only draw chunks within RENDER_DIST of the player
+        int playerCX = (int)(player.position.x / CHUNK_W);
+        int playerCZ = (int)(player.position.z / CHUNK_D);
         for (int cx = 0;cx < NUM_CX;cx++)
             for (int cz = 0;cz < NUM_CZ;cz++)
-                chunks[cx][cz].draw();
+            {
+                int dx = cx - playerCX;
+                int dz = cz - playerCZ;
+                if (dx * dx + dz * dz <= RENDER_DIST * RENDER_DIST)
+                    chunks[cx][cz].draw();
+            }
+
+        // ── Block highlight ──────────────────────────────
+        RayHit hit = castRay(player.eyePos(), player.front);
+        if (hit.hit)
+        {
+            glUseProgram(hlShader);
+            glUniformMatrix4fv(hlView, 1, GL_FALSE, glm::value_ptr(player.getViewMatrix()));
+            glUniformMatrix4fv(hlProj, 1, GL_FALSE, glm::value_ptr(player.getProjectionMatrix((float)windowWidth / windowHeight)));
+
+            glm::mat4 model = glm::translate(glm::mat4(1.0f),
+                glm::vec3(hit.block.x, hit.block.y, hit.block.z));
+            glUniformMatrix4fv(hlModel, 1, GL_FALSE, glm::value_ptr(model));
+
+            glLineWidth(2.0f);
+            glDisable(GL_DEPTH_TEST);
+            glBindVertexArray(hlVAO);
+            glDrawArrays(GL_LINES, 0, 24);
+            glEnable(GL_DEPTH_TEST);
+        }
+
+        // ── Crosshair ────────────────────────────────────
+        glUseProgram(chShader);
+        glLineWidth(2.0f);
+        glDisable(GL_DEPTH_TEST);
+        glBindVertexArray(chVAO);
+        glDrawArrays(GL_LINES, 0, 4);
+        glEnable(GL_DEPTH_TEST);
 
         SDL_GL_SwapWindow(window);
     }
@@ -656,6 +907,10 @@ int main()
         for (int cz = 0;cz < NUM_CZ;cz++)
             chunks[cx][cz].destroy();
 
+    glDeleteVertexArrays(1, &hlVAO); glDeleteBuffers(1, &hlVBO);
+    glDeleteVertexArrays(1, &chVAO); glDeleteBuffers(1, &chVBO);
+    glDeleteProgram(hlShader);
+    glDeleteProgram(chShader);
     glDeleteTextures(1, &atlasID);
     glDeleteProgram(shader);
     SDL_GL_DestroyContext(ctx);
