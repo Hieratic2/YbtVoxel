@@ -26,12 +26,12 @@ constexpr int TILE_STONE = 3;
 
 const char* vertexShaderSource = R"(
 #version 460 core
-layout (location = 0) in vec3  aPos;
-layout (location = 1) in vec2  aTexCoord;
-layout (location = 2) in float aFaceLight;
+layout (location = 0) in vec3 aPos;
+layout (location = 1) in vec2 aTexCoord;
+layout (location = 2) in vec3 aNormal;
 
-out vec2  TexCoord;
-out float FaceLight;
+out vec2 TexCoord;
+out vec3 Normal;
 
 uniform mat4 view;
 uniform mat4 projection;
@@ -40,36 +40,59 @@ void main()
 {
     gl_Position = projection * view * vec4(aPos, 1.0);
     TexCoord    = aTexCoord;
-    FaceLight   = aFaceLight;
+    Normal      = aNormal;
 }
 )";
 
 const char* fragmentShaderSource = R"(
 #version 460 core
-in vec2  TexCoord;
-in float FaceLight;
+in vec2 TexCoord;
+in vec3 Normal;
 out vec4 FragColor;
 
 uniform sampler2D uAtlas;
 
+// Sunlight — fixed directional light from above at an angle
+const vec3  lightDir   = normalize(vec3(0.6, 1.0, 0.4));
+const vec3  lightColor = vec3(1.0, 0.98, 0.92);
+const float ambient    = 0.35;
+
 void main()
 {
     vec4 texColor = texture(uAtlas, TexCoord);
-    vec3 col = texColor.rgb * FaceLight;
 
     // Grass top tint
+    vec3 col = texColor.rgb;
     if (TexCoord.x < 0.5 && TexCoord.y < 0.5)
         col *= vec3(0.47, 0.72, 0.25);
 
-    FragColor = vec4(col, texColor.a);
+    // Phong diffuse
+    float diff   = max(dot(normalize(Normal), lightDir), 0.0);
+    vec3  result = col * (ambient + diff * lightColor);
+
+    FragColor = vec4(result, texColor.a);
 }
 )";
 
+// =============================================================
+//  PLAYER  (camera + AABB physics)
+//
+//  AABB size:  0.6 wide (X/Z),  1.8 tall (Y)
+//  Eye height: 1.62 above feet (same as Minecraft)
+//
+//  Physics steps each frame:
+//    1. Apply gravity to velocityY
+//    2. Move X, resolve block collisions
+//    3. Move Y, resolve block collisions (sets onGround)
+//    4. Move Z, resolve block collisions
+// =============================================================
+
 struct Player
 {
-    
+    // Feet position (bottom-center of AABB)
     glm::vec3 position = glm::vec3(32.0f, 20.0f, 32.0f);
 
+    // Look direction
     glm::vec3 front = glm::vec3(0.0f, 0.0f, -1.0f);
     glm::vec3 up = glm::vec3(0.0f, 1.0f, 0.0f);
 
@@ -78,17 +101,20 @@ struct Player
     float sensitivity = 0.1f;
     float fov = 70.0f;
 
+    // Physics
     float velocityY = 0.0f;
     bool  onGround = false;
 
-    static constexpr float W = 0.3f;  
-    static constexpr float H = 1.8f;
-    static constexpr float EYE = 1.62f;
+    // AABB half-extents
+    static constexpr float W = 0.3f;   // half-width  (X and Z)
+    static constexpr float H = 1.8f;   // full height (Y)
+    static constexpr float EYE = 1.62f; // eye offset from feet
 
     static constexpr float GRAVITY = -28.0f;
     static constexpr float JUMP_SPEED = 9.0f;
     static constexpr float MOVE_SPEED = 5.0f;
 
+    // Camera eye position
     glm::vec3 eyePos() const { return position + glm::vec3(0, EYE, 0); }
 
     void processMouseMove(float dx, float dy)
@@ -105,8 +131,11 @@ struct Player
         front = glm::normalize(dir);
     }
 
+    // Check if the AABB at 'pos' overlaps any solid block
+    // We test all 8 corners of the AABB
     static bool overlapsBlock(glm::vec3 pos)
     {
+        // Gather all block coordinates the AABB touches
         int x0 = (int)floor(pos.x - W);
         int x1 = (int)floor(pos.x + W);
         int y0 = (int)floor(pos.y);
@@ -123,6 +152,7 @@ struct Player
 
     void update(const bool* keys, float dt)
     {
+        // ── Horizontal movement ──────────────────────────────
         glm::vec3 flat = glm::normalize(glm::vec3(front.x, 0.0f, front.z));
         glm::vec3 right = glm::normalize(glm::cross(front, up));
         glm::vec3 move = glm::vec3(0.0f);
@@ -135,28 +165,34 @@ struct Player
         if (glm::length(move) > 0.0f)
             move = glm::normalize(move) * MOVE_SPEED * dt;
 
+        // ── Jump ─────────────────────────────────────────────
         if (keys[SDL_SCANCODE_SPACE] && onGround) {
             velocityY = JUMP_SPEED;
             onGround = false;
         }
 
+        // ── Gravity ──────────────────────────────────────────
         velocityY += GRAVITY * dt;
         float dy = velocityY * dt;
 
+        // ── Resolve collisions per axis ───────────────────────
+        // X axis
         glm::vec3 newPos = position + glm::vec3(move.x, 0.0f, 0.0f);
         if (!overlapsBlock(newPos))
             position = newPos;
 
+        // Y axis
         newPos = position + glm::vec3(0.0f, dy, 0.0f);
         if (!overlapsBlock(newPos)) {
             position = newPos;
             onGround = false;
         }
         else {
-            if (dy < 0.0f) onGround = true;
+            if (dy < 0.0f) onGround = true;   // hit ground
             velocityY = 0.0f;
         }
 
+        // Z axis
         newPos = position + glm::vec3(0.0f, 0.0f, move.z);
         if (!overlapsBlock(newPos))
             position = newPos;
@@ -171,6 +207,10 @@ struct Player
         return glm::perspective(glm::radians(fov), aspect, 0.05f, 500.0f);
     }
 };
+
+// =============================================================
+//  PERLIN NOISE
+// =============================================================
 
 namespace Perlin
 {
@@ -217,6 +257,9 @@ namespace Perlin
     }
 }
 
+// =============================================================
+//  WORLD
+// =============================================================
 
 constexpr int WORLD_W = 64;
 constexpr int WORLD_H = 24;
@@ -265,14 +308,18 @@ static uint8_t getBlock(int x, int y, int z)
 }
 static bool isSolid(int x, int y, int z) { return getBlock(x, y, z) != BLOCK_AIR; }
 
+// =============================================================
+//  MESH BUILDING
+// =============================================================
 
-struct Vertex { float x, y, z, u, v, light; };
+struct Vertex { float x, y, z, u, v, nx, ny, nz; };
 
-static constexpr float LIGHT_TOP = 1.00f;
-static constexpr float LIGHT_BOTTOM = 0.45f;
-static constexpr float LIGHT_SIDE_Z = 0.80f;
-static constexpr float LIGHT_SIDE_X = 0.65f;
-
+// Returns the bottom-left UV corner of a tile in the atlas.
+// Atlas layout (2x2, each tile = 0.5 UV units):
+//   tile 0 (GRASS_TOP)  -> (0.0, 0.0) top-left
+//   tile 1 (GRASS_SIDE) -> (0.5, 0.0) top-right
+//   tile 2 (DIRT)       -> (0.0, 0.5) bottom-left
+//   tile 3 (STONE)      -> (0.5, 0.5) bottom-right
 static glm::vec2 tileUV(int tile)
 {
     float u = (tile % 2) * 0.5f;
@@ -282,6 +329,7 @@ static glm::vec2 tileUV(int tile)
 
 static int getTile(uint8_t block, int face)
 {
+    // face: 0 = top, 1 = bottom, 2 = side
     switch (block) {
     case BLOCK_GRASS:
         if (face == 0) return TILE_GRASS_TOP;
@@ -298,7 +346,8 @@ static void pushQuad(std::vector<Vertex>& verts,
     float x1, float y1, float z1,
     float x2, float y2, float z2,
     float x3, float y3, float z3,
-    float light, int tile)
+    float nx, float ny, float nz,
+    int tile)
 {
     glm::vec2 base = tileUV(tile);
     float s = 0.5f;
@@ -308,13 +357,14 @@ static void pushQuad(std::vector<Vertex>& verts,
     glm::vec2 uvC = base + glm::vec2(s, 0.0f);
     glm::vec2 uvD = base + glm::vec2(0.0f, 0.0f);
 
-    verts.push_back({ x0,y0,z0, uvA.x,uvA.y, light });
-    verts.push_back({ x1,y1,z1, uvB.x,uvB.y, light });
-    verts.push_back({ x2,y2,z2, uvC.x,uvC.y, light });
-
-    verts.push_back({ x0,y0,z0, uvA.x,uvA.y, light });
-    verts.push_back({ x2,y2,z2, uvC.x,uvC.y, light });
-    verts.push_back({ x3,y3,z3, uvD.x,uvD.y, light });
+    // Triangle 1
+    verts.push_back({ x0,y0,z0, uvA.x,uvA.y, nx,ny,nz });
+    verts.push_back({ x1,y1,z1, uvB.x,uvB.y, nx,ny,nz });
+    verts.push_back({ x2,y2,z2, uvC.x,uvC.y, nx,ny,nz });
+    // Triangle 2
+    verts.push_back({ x0,y0,z0, uvA.x,uvA.y, nx,ny,nz });
+    verts.push_back({ x2,y2,z2, uvC.x,uvC.y, nx,ny,nz });
+    verts.push_back({ x3,y3,z3, uvD.x,uvD.y, nx,ny,nz });
 }
 
 static std::vector<Vertex> buildChunkMesh(int cx, int cz)
@@ -336,38 +386,43 @@ static std::vector<Vertex> buildChunkMesh(int cx, int cz)
 
                 float x = (float)wx, Y = (float)y, z = (float)wz;
 
+                // +Y top
                 if (!isSolid(wx, y + 1, wz))
                     pushQuad(verts,
                         x, Y + 1, z, x + 1, Y + 1, z, x + 1, Y + 1, z + 1, x, Y + 1, z + 1,
-                        LIGHT_TOP, getTile(block, 0));
-
+                        0, 1, 0, getTile(block, 0));
+                // -Y bottom
                 if (!isSolid(wx, y - 1, wz))
                     pushQuad(verts,
                         x + 1, Y, z, x, Y, z, x, Y, z + 1, x + 1, Y, z + 1,
-                        LIGHT_BOTTOM, getTile(block, 1));
-                
+                        0, -1, 0, getTile(block, 1));
+                // +Z front
                 if (!isSolid(wx, y, wz + 1))
                     pushQuad(verts,
                         x, Y, z + 1, x + 1, Y, z + 1, x + 1, Y + 1, z + 1, x, Y + 1, z + 1,
-                        LIGHT_SIDE_Z, getTile(block, 2));
-                
+                        0, 0, 1, getTile(block, 2));
+                // -Z back
                 if (!isSolid(wx, y, wz - 1))
                     pushQuad(verts,
                         x + 1, Y, z, x, Y, z, x, Y + 1, z, x + 1, Y + 1, z,
-                        LIGHT_SIDE_Z, getTile(block, 2));
-                
+                        0, 0, -1, getTile(block, 2));
+                // +X right
                 if (!isSolid(wx + 1, y, wz))
                     pushQuad(verts,
                         x + 1, Y, z + 1, x + 1, Y, z, x + 1, Y + 1, z, x + 1, Y + 1, z + 1,
-                        LIGHT_SIDE_X, getTile(block, 2));
-                
+                        1, 0, 0, getTile(block, 2));
+                // -X left
                 if (!isSolid(wx - 1, y, wz))
                     pushQuad(verts,
                         x, Y, z, x, Y, z + 1, x, Y + 1, z + 1, x, Y + 1, z,
-                        LIGHT_SIDE_X, getTile(block, 2));
+                        -1, 0, 0, getTile(block, 2));
             }
     return verts;
 }
+
+// =============================================================
+//  GPU MESH
+// =============================================================
 
 struct ChunkMesh
 {
@@ -386,13 +441,26 @@ struct ChunkMesh
         glEnableVertexAttribArray(0);
         glVertexAttribPointer(1, 2, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, u));
         glEnableVertexAttribArray(1);
-        glVertexAttribPointer(2, 1, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, light));
+        glVertexAttribPointer(2, 3, GL_FLOAT, GL_FALSE, sizeof(Vertex), (void*)offsetof(Vertex, nx));
         glEnableVertexAttribArray(2);
         glBindVertexArray(0);
     }
     void draw()  const { if (count) { glBindVertexArray(VAO); glDrawArrays(GL_TRIANGLES, 0, count); } }
     void destroy() { if (VAO) { glDeleteVertexArrays(1, &VAO); glDeleteBuffers(1, &VBO); VAO = VBO = 0; } }
 };
+
+// =============================================================
+//  TEXTURE ATLAS LOADER
+//  Stitches 4 PNGs into a single 2x2 OpenGL texture.
+//
+//  Atlas layout:
+//    +----------+----------+
+//    | grassTop | grassSide|   v = 0.0 .. 0.5
+//    +----------+----------+
+//    | dirt     | stone    |   v = 0.5 .. 1.0
+//    +----------+----------+
+//      u=0..0.5   u=0.5..1
+// =============================================================
 
 static unsigned int loadTextureAtlas(const char* grassTop,
     const char* grassSide,
@@ -411,7 +479,7 @@ static unsigned int loadTextureAtlas(const char* grassTop,
             unsigned char* img = stbi_load(path, &w, &h, &ch, 4);
             if (!img) {
                 SDL_Log("Failed to load texture: %s — %s", path, stbi_failure_reason());
-                
+                // magenta for missing textures
                 for (int py = 0; py < tileSize; py++)
                     for (int px = 0; px < tileSize; px++) {
                         int idx = ((offY + py) * atlasW + (offX + px)) * 4;
@@ -419,7 +487,7 @@ static unsigned int loadTextureAtlas(const char* grassTop,
                     }
                 return;
             }
-            
+            // Nearest-neighbour resample into tileSize x tileSize
             for (int py = 0; py < tileSize; py++) {
                 for (int px = 0; px < tileSize; px++) {
                     int srcX = px * w / tileSize;
@@ -435,6 +503,12 @@ static unsigned int loadTextureAtlas(const char* grassTop,
             stbi_image_free(img);
         };
 
+    // Blit each tile into its position in the atlas.
+    // Must match tileUV() mapping:
+    //   tile 0 (GRASS_TOP)  -> (0,        0)         u=0.0, v=0.0
+    //   tile 1 (GRASS_SIDE) -> (tileSize, 0)         u=0.5, v=0.0
+    //   tile 2 (DIRT)       -> (0,        tileSize)  u=0.0, v=0.5
+    //   tile 3 (STONE)      -> (tileSize, tileSize)  u=0.5, v=0.5
     blit(grassTop, 0, 0);
     blit(grassSide, tileSize, 0);
     blit(dirt, 0, tileSize);
@@ -454,7 +528,9 @@ static unsigned int loadTextureAtlas(const char* grassTop,
     return texID;
 }
 
-
+// =============================================================
+//  SHADER HELPERS
+// =============================================================
 
 static unsigned int compileShader(GLenum type, const char* src)
 {
@@ -476,6 +552,9 @@ static unsigned int createProgram(const char* vs, const char* fs)
     return p;
 }
 
+// =============================================================
+//  MAIN
+// =============================================================
 
 int main()
 {
@@ -487,14 +566,10 @@ int main()
 
     if (!SDL_Init(SDL_INIT_VIDEO)) { SDL_Log("SDL init failed"); return -1; }
 
-    int windowWidth = 1280, windowHeight = 720;
-    SDL_Window* window = SDL_CreateWindow("YbtVoxel", windowWidth, windowHeight,
+    int winW = 1280, winH = 720;
+    SDL_Window* window = SDL_CreateWindow("YbtVoxel", winW, winH,
         SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE);
-    if (!window) {
-        SDL_Log("Window failed");
-        SDL_Quit();
-        return -1;
-    }
+    if (!window) { SDL_Log("Window failed"); SDL_Quit(); return -1; }
 
     SDL_GLContext ctx = SDL_GL_CreateContext(window);
     if (!gladLoadGLLoader((GLADloadproc)SDL_GL_GetProcAddress))
@@ -543,7 +618,7 @@ int main()
         Uint64 now = SDL_GetTicks();
         float dt = (now - lastTime) / 1000.0f;
         lastTime = now;
-        
+        // Cap dt to avoid large jumps on lag spikes
         if (dt > 0.05f) dt = 0.05f;
 
         while (SDL_PollEvent(&event))
@@ -551,8 +626,8 @@ int main()
             if (event.type == SDL_EVENT_QUIT) quit = true;
             if (event.type == SDL_EVENT_KEY_DOWN && event.key.key == SDLK_ESCAPE) quit = true;
             if (event.type == SDL_EVENT_WINDOW_RESIZED) {
-                windowWidth = event.window.data1; windowHeight = event.window.data2;
-                glViewport(0, 0, windowWidth, windowHeight);
+                winW = event.window.data1; winH = event.window.data2;
+                glViewport(0, 0, winW, winH);
             }
             if (event.type == SDL_EVENT_MOUSE_MOTION)
                 player.processMouseMove((float)event.motion.xrel, (float)event.motion.yrel);
@@ -568,7 +643,7 @@ int main()
         glUniform1i(uAtlas, 0);
 
         glUniformMatrix4fv(uView, 1, GL_FALSE, glm::value_ptr(player.getViewMatrix()));
-        glUniformMatrix4fv(uProj, 1, GL_FALSE, glm::value_ptr(player.getProjectionMatrix((float)windowWidth / windowHeight)));
+        glUniformMatrix4fv(uProj, 1, GL_FALSE, glm::value_ptr(player.getProjectionMatrix((float)winW / winH)));
 
         for (int cx = 0;cx < NUM_CX;cx++)
             for (int cz = 0;cz < NUM_CZ;cz++)
