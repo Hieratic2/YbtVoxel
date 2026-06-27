@@ -9,10 +9,20 @@
 #include <vector>
 #include <cmath>
 
+static bool isSolid(int x, int y, int z);
+
+// =============================================================
+//  TILE INDICES
+// =============================================================
+
 constexpr int TILE_GRASS_TOP = 0;
 constexpr int TILE_GRASS_SIDE = 1;
 constexpr int TILE_DIRT = 2;
 constexpr int TILE_STONE = 3;
+
+// =============================================================
+//  SHADERS
+// =============================================================
 
 const char* vertexShaderSource = R"(
 #version 460 core
@@ -47,7 +57,7 @@ void main()
     vec4 texColor = texture(uAtlas, TexCoord);
     vec3 col = texColor.rgb * FaceLight;
 
-    // Grass top tint — same green Minecraft uses
+    // Grass top tint
     if (TexCoord.x < 0.5 && TexCoord.y < 0.5)
         col *= vec3(0.47, 0.72, 0.25);
 
@@ -55,22 +65,36 @@ void main()
 }
 )";
 
-struct Camera
+struct Player
 {
+    
     glm::vec3 position = glm::vec3(32.0f, 20.0f, 32.0f);
+
     glm::vec3 front = glm::vec3(0.0f, 0.0f, -1.0f);
     glm::vec3 up = glm::vec3(0.0f, 1.0f, 0.0f);
 
     float yaw = -90.0f;
     float pitch = 0.0f;
-    float speed = 10.0f;
     float sensitivity = 0.1f;
     float fov = 70.0f;
 
-    void processMouseMove(float xOffset, float yOffset)
+    float velocityY = 0.0f;
+    bool  onGround = false;
+
+    static constexpr float W = 0.3f;  
+    static constexpr float H = 1.8f;
+    static constexpr float EYE = 1.62f;
+
+    static constexpr float GRAVITY = -28.0f;
+    static constexpr float JUMP_SPEED = 9.0f;
+    static constexpr float MOVE_SPEED = 5.0f;
+
+    glm::vec3 eyePos() const { return position + glm::vec3(0, EYE, 0); }
+
+    void processMouseMove(float dx, float dy)
     {
-        yaw += xOffset * sensitivity;
-        pitch -= yOffset * sensitivity;
+        yaw += dx * sensitivity;
+        pitch -= dy * sensitivity;
         if (pitch > 89.0f) pitch = 89.0f;
         if (pitch < -89.0f) pitch = -89.0f;
 
@@ -81,23 +105,66 @@ struct Camera
         front = glm::normalize(dir);
     }
 
-    void processKeyboard(const bool* keys, float dt)
+    static bool overlapsBlock(glm::vec3 pos)
     {
-        float     vel = speed * dt;
+        int x0 = (int)floor(pos.x - W);
+        int x1 = (int)floor(pos.x + W);
+        int y0 = (int)floor(pos.y);
+        int y1 = (int)floor(pos.y + H - 0.001f);
+        int z0 = (int)floor(pos.z - W);
+        int z1 = (int)floor(pos.z + W);
+
+        for (int x = x0; x <= x1; x++)
+            for (int y = y0; y <= y1; y++)
+                for (int z = z0; z <= z1; z++)
+                    if (isSolid(x, y, z)) return true;
+        return false;
+    }
+
+    void update(const bool* keys, float dt)
+    {
         glm::vec3 flat = glm::normalize(glm::vec3(front.x, 0.0f, front.z));
         glm::vec3 right = glm::normalize(glm::cross(front, up));
+        glm::vec3 move = glm::vec3(0.0f);
 
-        if (keys[SDL_SCANCODE_W])     position += flat * vel;
-        if (keys[SDL_SCANCODE_S])     position -= flat * vel;
-        if (keys[SDL_SCANCODE_A])     position -= right * vel;
-        if (keys[SDL_SCANCODE_D])     position += right * vel;
-        if (keys[SDL_SCANCODE_SPACE]) position.y += vel;
-        if (keys[SDL_SCANCODE_LCTRL]) position.y -= vel;
+        if (keys[SDL_SCANCODE_W]) move += flat;
+        if (keys[SDL_SCANCODE_S]) move -= flat;
+        if (keys[SDL_SCANCODE_A]) move -= right;
+        if (keys[SDL_SCANCODE_D]) move += right;
+
+        if (glm::length(move) > 0.0f)
+            move = glm::normalize(move) * MOVE_SPEED * dt;
+
+        if (keys[SDL_SCANCODE_SPACE] && onGround) {
+            velocityY = JUMP_SPEED;
+            onGround = false;
+        }
+
+        velocityY += GRAVITY * dt;
+        float dy = velocityY * dt;
+
+        glm::vec3 newPos = position + glm::vec3(move.x, 0.0f, 0.0f);
+        if (!overlapsBlock(newPos))
+            position = newPos;
+
+        newPos = position + glm::vec3(0.0f, dy, 0.0f);
+        if (!overlapsBlock(newPos)) {
+            position = newPos;
+            onGround = false;
+        }
+        else {
+            if (dy < 0.0f) onGround = true;
+            velocityY = 0.0f;
+        }
+
+        newPos = position + glm::vec3(0.0f, 0.0f, move.z);
+        if (!overlapsBlock(newPos))
+            position = newPos;
     }
 
     glm::mat4 getViewMatrix() const
     {
-        return glm::lookAt(position, position + front, up);
+        return glm::lookAt(eyePos(), eyePos() + front, up);
     }
     glm::mat4 getProjectionMatrix(float aspect) const
     {
@@ -149,6 +216,7 @@ namespace Perlin
         return val / maxV;
     }
 }
+
 
 constexpr int WORLD_W = 64;
 constexpr int WORLD_H = 24;
@@ -243,7 +311,7 @@ static void pushQuad(std::vector<Vertex>& verts,
     verts.push_back({ x0,y0,z0, uvA.x,uvA.y, light });
     verts.push_back({ x1,y1,z1, uvB.x,uvB.y, light });
     verts.push_back({ x2,y2,z2, uvC.x,uvC.y, light });
-    
+
     verts.push_back({ x0,y0,z0, uvA.x,uvA.y, light });
     verts.push_back({ x2,y2,z2, uvC.x,uvC.y, light });
     verts.push_back({ x3,y3,z3, uvD.x,uvD.y, light });
@@ -272,12 +340,12 @@ static std::vector<Vertex> buildChunkMesh(int cx, int cz)
                     pushQuad(verts,
                         x, Y + 1, z, x + 1, Y + 1, z, x + 1, Y + 1, z + 1, x, Y + 1, z + 1,
                         LIGHT_TOP, getTile(block, 0));
-                
+
                 if (!isSolid(wx, y - 1, wz))
                     pushQuad(verts,
                         x + 1, Y, z, x, Y, z, x, Y, z + 1, x + 1, Y, z + 1,
                         LIGHT_BOTTOM, getTile(block, 1));
-               
+                
                 if (!isSolid(wx, y, wz + 1))
                     pushQuad(verts,
                         x, Y, z + 1, x + 1, Y, z + 1, x + 1, Y + 1, z + 1, x, Y + 1, z + 1,
@@ -300,7 +368,6 @@ static std::vector<Vertex> buildChunkMesh(int cx, int cz)
             }
     return verts;
 }
-
 
 struct ChunkMesh
 {
@@ -388,6 +455,7 @@ static unsigned int loadTextureAtlas(const char* grassTop,
 }
 
 
+
 static unsigned int compileShader(GLenum type, const char* src)
 {
     unsigned int s = glCreateShader(type);
@@ -431,9 +499,7 @@ int main()
     SDL_GLContext ctx = SDL_GL_CreateContext(window);
     if (!gladLoadGLLoader((GLADloadproc)SDL_GL_GetProcAddress))
     {
-        SDL_Log("GLAD failed");
-        SDL_Quit();
-        return -1;
+        SDL_Log("GLAD failed"); SDL_Quit(); return -1;
     }
 
     SDL_GL_SetSwapInterval(1);
@@ -464,9 +530,9 @@ int main()
         for (int cz = 0;cz < NUM_CZ;cz++)
             chunks[cx][cz].upload(buildChunkMesh(cx, cz));
 
-    Camera camera;
+    Player player;
     int mx = WORLD_W / 2, mz = WORLD_D / 2;
-    camera.position = glm::vec3(mx, heightMap[mx][mz] + 3.0f, mz);
+    player.position = glm::vec3(mx, heightMap[mx][mz] + 2.0f, mz);
 
     Uint64 lastTime = SDL_GetTicks();
     bool quit = false;
@@ -477,6 +543,8 @@ int main()
         Uint64 now = SDL_GetTicks();
         float dt = (now - lastTime) / 1000.0f;
         lastTime = now;
+        
+        if (dt > 0.05f) dt = 0.05f;
 
         while (SDL_PollEvent(&event))
         {
@@ -487,10 +555,10 @@ int main()
                 glViewport(0, 0, windowWidth, windowHeight);
             }
             if (event.type == SDL_EVENT_MOUSE_MOTION)
-                camera.processMouseMove((float)event.motion.xrel, (float)event.motion.yrel);
+                player.processMouseMove((float)event.motion.xrel, (float)event.motion.yrel);
         }
 
-        camera.processKeyboard(SDL_GetKeyboardState(nullptr), dt);
+        player.update(SDL_GetKeyboardState(nullptr), dt);
 
         glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
         glUseProgram(shader);
@@ -499,8 +567,8 @@ int main()
         glBindTexture(GL_TEXTURE_2D, atlasID);
         glUniform1i(uAtlas, 0);
 
-        glUniformMatrix4fv(uView, 1, GL_FALSE, glm::value_ptr(camera.getViewMatrix()));
-        glUniformMatrix4fv(uProj, 1, GL_FALSE, glm::value_ptr(camera.getProjectionMatrix((float)windowWidth / windowHeight)));
+        glUniformMatrix4fv(uView, 1, GL_FALSE, glm::value_ptr(player.getViewMatrix()));
+        glUniformMatrix4fv(uProj, 1, GL_FALSE, glm::value_ptr(player.getProjectionMatrix((float)windowWidth / windowHeight)));
 
         for (int cx = 0;cx < NUM_CX;cx++)
             for (int cz = 0;cz < NUM_CZ;cz++)
