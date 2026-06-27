@@ -26,10 +26,12 @@ obj/
 # =========================
 # C++ Compilation Artifacts
 # =========================
+x64/Debug/*.lib
+x64/Debug/*.dll
+x64/Release/*.lib
+x64/Release/*.dll
 *.obj
 *.exe
-*.dll
-*.lib
 *.ilk
 *.pdb
 *.exp
