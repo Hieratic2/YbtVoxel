@@ -44,6 +44,10 @@ A Minecraft-inspired voxel world built with OpenGL 4.6 and SDL3 as a Computer Gr
 
 ---
 
+## Demo Video
+
+https://youtu.be/Wf5Rd6X5g5M
+
 ## Controls
 
 | Key / Input | Action |
